@@ -1,0 +1,34 @@
+<?xml version="1.0"?>
+<assembly>
+	<id>plugin</id>
+	<formats>
+		<format>zip</format>
+	</formats>
+	<includeBaseDirectory>false</includeBaseDirectory>
+	<dependencySets>
+		<dependencySet>
+			<outputDirectory>/</outputDirectory>
+			<useProjectArtifact>true</useProjectArtifact>
+			<useTransitiveFiltering>true</useTransitiveFiltering>
+			<excludes>
+				<exclude>org.elasticsearch:elasticsearch</exclude>
+			</excludes>
+		</dependencySet>
+		<dependencySet>
+			<outputDirectory>/</outputDirectory>
+			<useProjectArtifact>true</useProjectArtifact>
+			<useTransitiveFiltering>true</useTransitiveFiltering>
+			<includes>
+				<include>com.google.http-client:google-http-client-jackson2</include>
+			</includes>
+		</dependencySet>
+        <dependencySet>
+            <outputDirectory>/</outputDirectory>
+            <useProjectArtifact>true</useProjectArtifact>
+            <useTransitiveFiltering>true</useTransitiveFiltering>
+            <includes>
+                <include>com.google.apis:google-api-services-bigquery</include>
+            </includes>
+        </dependencySet>
+	</dependencySets>
+</assembly>
