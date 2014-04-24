@@ -1,5 +1,7 @@
 #!/bin/bash
 
+# query can also be javascript, e.g : "query":"var now = Date.now(); 'SELECT * FORM [t_' + now + '] LIMIT 10'"
+
 JSON=$(cat <<EOF
 {
     "type":"river-bigquery",

@@ -28,6 +28,8 @@ import org.elasticsearch.river.AbstractRiverComponent;
 import org.elasticsearch.river.River;
 import org.elasticsearch.river.RiverName;
 import org.elasticsearch.river.RiverSettings;
+import org.mozilla.javascript.Context;
+import org.mozilla.javascript.ScriptableObject;
 
 import com.google.api.client.googleapis.auth.oauth2.GoogleCredential;
 import com.google.api.client.googleapis.javanet.GoogleNetHttpTransport;
@@ -212,7 +214,7 @@ public class BigQueryRiver extends AbstractRiverComponent implements River {
 					}
 				}
 				try {
-					sleep(1000);
+					sleep(100);
 				} catch (InterruptedException e) {
 					logger.trace("Thread sleep cycle has been interrupted", e);
 				}
@@ -282,7 +284,7 @@ public class BigQueryRiver extends AbstractRiverComponent implements River {
 								document.put(key, map);
 								continue;
 							} catch (Exception e) {
-								logger.warn("Unable to parse json of field {}", e, key);
+								logger.debug("Unable to parse json of field {}", e, key);
 							}
 						}
 
@@ -293,7 +295,7 @@ public class BigQueryRiver extends AbstractRiverComponent implements River {
 								document.put(key, list);
 								continue;
 							} catch (Exception e) {
-								logger.warn("Unable to parse json of field {}", e, key);
+								logger.debug("Unable to parse json of field {}", e, key);
 							}
 						}
 						document.put(key, value);
@@ -318,7 +320,7 @@ public class BigQueryRiver extends AbstractRiverComponent implements River {
 				final JobConfiguration config = new JobConfiguration();
 				final JobConfigurationQuery queryConfig = new JobConfigurationQuery();
 
-				job.setConfiguration(config.setQuery(queryConfig.setQuery(query)));
+				job.setConfiguration(config.setQuery(queryConfig.setQuery(evalQuery(query))));
 
 				final Insert insert = client.jobs().insert(project, job).setProjectId(project);
 				jobReference = insert.execute().getJobReference();
@@ -351,6 +353,16 @@ public class BigQueryRiver extends AbstractRiverComponent implements River {
 					logger.trace("Unable to put thread to sleep", e);
 				}
 			}
+		}
+
+		private String evalQuery(final String query) {
+			if (!query.trim().toLowerCase().startsWith("select")) {
+				final Context context = Context.enter();
+				final ScriptableObject scope = context.initStandardObjects();
+				final Object result = context.evaluateString(scope, query, "query", 1, null);
+				return Context.toString(result);
+			}
+			return query;
 		}
 	}
 }

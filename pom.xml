@@ -24,6 +24,7 @@
 		<version.elasticsearch>1.1.1</version.elasticsearch>
 		<version.google.api>1.17.0-rc</version.google.api>
 		<version.google.bigquery>v2-rev120-1.17.0-rc</version.google.bigquery>
+		<version.rhino>1.7R2</version.rhino>
 
 		<version.testng>6.8.1</version.testng>
 		<version.jmockit>1.5</version.jmockit>
@@ -54,6 +55,11 @@
 			<groupId>com.google.apis</groupId>
 			<artifactId>google-api-services-bigquery</artifactId>
 			<version>${version.google.bigquery}</version>
+		</dependency>
+		<dependency>
+			<groupId>rhino</groupId>
+			<artifactId>js</artifactId>
+			<version>${version.rhino}</version>
 		</dependency>
 
 		<!-- Required for mocking during tests -->
