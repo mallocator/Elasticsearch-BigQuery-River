@@ -14,6 +14,9 @@ import java.util.List;
 import java.util.Map;
 import java.util.Map.Entry;
 
+import javax.annotation.Nonnull;
+import javax.annotation.Nullable;
+
 import org.elasticsearch.ElasticsearchException;
 import org.elasticsearch.ExceptionsHelper;
 import org.elasticsearch.action.index.IndexRequest.OpType;
@@ -208,6 +211,7 @@ public class BigQueryRiver extends AbstractRiverComponent implements River {
 						logger.error("Parser was unable to run properl", e);
 					}
 					if (interval <= 0) {
+						logger.info("Stopping BigQuery Import Thread because no interval for repeated fetches has been configured");
 						break;
 					}
 					if (!stopThread) {
@@ -223,53 +227,8 @@ public class BigQueryRiver extends AbstractRiverComponent implements River {
 			logger.info("BigQuery Import Thread has finished");
 		}
 
-		/**
-		 * Mostly just write the data you got from BigQuery into ElasticSearch.
-		 * 
-		 * @throws ElasticsearchException
-		 * @throws IOException
-		 * @throws InterruptedException
-		 */
-		private void parse(final List<TableRow> rows) throws ElasticsearchException, IOException, InterruptedException {
-			if (rows == null || rows.isEmpty()) {
-				logger.warn("Got 0 results from database. Aborting before we do some damage and remove still valid entries.");
-				return;
-			}
-			final int size = rows.size();
-			final String timestamp = String.valueOf((int) (System.currentTimeMillis() / 1000));
-			int progress = 0;
-			logger.info("Got {} results from BigQuery database", size);
-
-			while (!stopThread && !rows.isEmpty()) {
-				final TableRow row = rows.remove(0);
-				final String source = getJson(row);
-				final IndexRequestBuilder builder = esClient.prepareIndex(index, type);
-				if (uniqueIdField != null) {
-					if (!row.containsKey(uniqueIdField)) {
-						logger.error("A returned result didn't contain the configured unique id \"{}\"", uniqueIdField);
-					}
-					else {
-						builder.setId(String.valueOf(row.get(uniqueIdField)));
-					}
-				}
-				builder.setOpType(OpType.CREATE)
-					.setReplicationType(ReplicationType.ASYNC)
-					.setOperationThreaded(true)
-					.setTimestamp(timestamp)
-					.setSource(source)
-					.execute()
-					.actionGet();
-				if (++progress % 100 == 0) {
-					logger.debug("Processed {} entries ({} percent done)", progress, Math.round((float) progress / (float) size * 100f));
-				}
-			}
-			logger.info("Imported {} entries into ElasticSeach from BigQuery!", size);
-			logger.info("BigQuery river has been completed");
-			return;
-		}
-
 		@SuppressWarnings("unchecked")
-		private String getJson(final TableRow rows) throws IOException {
+		private String getJson(@Nonnull final TableRow rows) throws IOException {
 			final Map<String, Object> document = new HashMap<>();
 			for (final Entry<String, Object> row : rows.entrySet()) {
 				int columnCounter = 0;
@@ -313,7 +272,8 @@ public class BigQueryRiver extends AbstractRiverComponent implements River {
 		 * @throws IOException
 		 * @throws InterruptedException
 		 */
-		private void executeJob(final JobReference activeJob) throws IOException, InterruptedException {
+		private void executeJob(@Nullable final JobReference activeJob) throws IOException, InterruptedException {
+			logger.debug("Running Job to fetch data from BigQuery");
 			JobReference jobReference;
 			if (activeJob == null) {
 				fetchedRows = new BigInteger("0");
@@ -334,21 +294,34 @@ public class BigQueryRiver extends AbstractRiverComponent implements River {
 				final Job pollJob = client.jobs().get(project, jobReference.getJobId()).execute();
 
 				if (pollJob.getStatus().getState().equals("DONE")) {
+					logger.debug("BigQuery Job has finished, fetching results");
+
 					final GetQueryResultsResponse queryResult = client.jobs()
 						.getQueryResults(project, pollJob.getJobReference().getJobId())
 						.execute();
+
+					if (queryResult.getTotalRows().equals(BigInteger.ZERO)) {
+						logger.info("Got 0 results from BigQuery - not gonna do anything");
+						return;
+					}
+
+					logger.trace("Getting column names from BigQuery to be used for building json structure");
 					columns = new ArrayList<>();
 					for (TableFieldSchema fieldSchema : queryResult.getSchema().getFields()) {
 						columns.add(fieldSchema.getName());
 					}
 					fetchedRows = fetchedRows.add(new BigInteger("" + queryResult.getRows().size()));
+
 					parse(queryResult.getRows());
+
 					if (fetchedRows.compareTo(queryResult.getTotalRows()) < 0) {
+						logger.debug("Continuing BigQuery job as not all rows could be fetched on the first request");
 						executeJob(jobReference);
 					}
-					break;
+					return;
 				}
 				try {
+					logger.trace("Waiting for BigQuery job to be done (state is {})", pollJob.getStatus().getState());
 					Thread.sleep(1000);
 				} catch (InterruptedException e) {
 					logger.trace("Unable to put thread to sleep", e);
@@ -356,12 +329,54 @@ public class BigQueryRiver extends AbstractRiverComponent implements River {
 			}
 		}
 
-		private String evalQuery(final String query) {
+		/**
+		 * Mostly just write the data you got from BigQuery into ElasticSearch.
+		 * 
+		 * @throws ElasticsearchException
+		 * @throws IOException
+		 * @throws InterruptedException
+		 */
+		private void parse(@Nonnull final List<TableRow> rows) throws ElasticsearchException, IOException, InterruptedException {
+			final int size = rows.size();
+			final String timestamp = String.valueOf((int) (System.currentTimeMillis() / 1000));
+			int progress = 0;
+			logger.info("Got {} results from BigQuery database", size);
+
+			while (!stopThread && !rows.isEmpty()) {
+				final TableRow row = rows.remove(0);
+				final String source = getJson(row);
+				final IndexRequestBuilder builder = esClient.prepareIndex(index, type);
+				if (uniqueIdField != null) {
+					if (!row.containsKey(uniqueIdField)) {
+						logger.error("A returned result didn't contain the configured unique id \"{}\"", uniqueIdField);
+					}
+					else {
+						builder.setId(String.valueOf(row.get(uniqueIdField)));
+					}
+				}
+				builder.setOpType(OpType.CREATE)
+					.setReplicationType(ReplicationType.ASYNC)
+					.setOperationThreaded(true)
+					.setTimestamp(timestamp)
+					.setSource(source)
+					.execute()
+					.actionGet();
+				if (++progress % 100 == 0) {
+					logger.debug("Processed {} entries ({} percent done)", progress, Math.round((float) progress / (float) size * 100f));
+				}
+			}
+			logger.info("Imported {} entries into ElasticSeach from BigQuery!", size);
+			return;
+		}
+
+		private String evalQuery(@Nonnull final String query) {
 			if (!query.trim().toLowerCase().startsWith("select")) {
 				final Context context = Context.enter();
 				final ScriptableObject scope = context.initStandardObjects();
 				final Object result = context.evaluateString(scope, query, "query", 1, null);
-				return Context.toString(result);
+				final String evaluatedQuery = Context.toString(result);
+				logger.debug("Query was javascript and has been evaluated to: {}", evaluatedQuery);
+				return evaluatedQuery;
 			}
 			return query;
 		}
