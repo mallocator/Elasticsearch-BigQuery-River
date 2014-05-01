@@ -199,8 +199,9 @@ public class BigQueryRiver extends AbstractRiverComponent implements River {
 			logger.info("BigQuery Import Thread has started");
 			long lastRun = 0;
 			while (!stopThread) {
-				if (lastRun + interval < System.currentTimeMillis()) {
-					lastRun = System.currentTimeMillis();
+				final long now = System.currentTimeMillis();
+				if (lastRun + interval < now) {
+					lastRun = now;
 					try {
 						executeJob(null);
 					} catch (ElasticsearchException | IOException | InterruptedException e) {
@@ -214,7 +215,7 @@ public class BigQueryRiver extends AbstractRiverComponent implements River {
 					}
 				}
 				try {
-					sleep(100);
+					sleep(250);
 				} catch (InterruptedException e) {
 					logger.trace("Thread sleep cycle has been interrupted", e);
 				}

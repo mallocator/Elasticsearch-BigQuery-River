@@ -22,8 +22,8 @@
 		<java.version>1.7</java.version>
 
 		<version.elasticsearch>1.1.1</version.elasticsearch>
-		<version.google.api>1.17.0-rc</version.google.api>
-		<version.google.bigquery>v2-rev120-1.17.0-rc</version.google.bigquery>
+		<version.google.api>1.18.0-rc</version.google.api>
+		<version.google.bigquery>v2-rev141-1.18.0-rc</version.google.bigquery>
 		<version.rhino>1.7R2</version.rhino>
 
 		<version.testng>6.8.1</version.testng>
