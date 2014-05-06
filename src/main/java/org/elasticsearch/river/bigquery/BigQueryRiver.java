@@ -32,6 +32,7 @@ import org.elasticsearch.river.River;
 import org.elasticsearch.river.RiverName;
 import org.elasticsearch.river.RiverSettings;
 import org.mozilla.javascript.Context;
+import org.mozilla.javascript.RhinoException;
 import org.mozilla.javascript.ScriptableObject;
 
 import com.google.api.client.googleapis.auth.oauth2.GoogleCredential;
@@ -69,20 +70,22 @@ public class BigQueryRiver extends AbstractRiverComponent implements River {
 	private final String	query;
 	private final String	uniqueIdField;
 	private final long		interval;
-	public final String		type;
-	public final String		index;
+	public final String		typeScript;
+	public final String		indexScript;
+	private final String mappingScript;
 
 	@Inject
 	public BigQueryRiver(final RiverName riverName, final RiverSettings settings, final Client esClient) {
 		super(riverName, settings);
 		this.esClient = esClient;
 		logger.info("Creating BigQuery Stream River");
-		index = readConfig("index", riverName.name());
-		type = readConfig("type", "import");
+		indexScript = readConfig("index", riverName.name());
+		typeScript = readConfig("type", "import");
 		project = readConfig("project");
 		keyFile = readConfig("keyFile");
 		account = readConfig("account");
 		query = readConfig("query");
+		mappingScript = readConfig("mapping", null);
 		uniqueIdField = readConfig("uniqueIdField", null);
 		interval = Long.parseLong(readConfig("interval", "600000"));
 	}
@@ -108,39 +111,6 @@ public class BigQueryRiver extends AbstractRiverComponent implements River {
 	@Override
 	public void start() {
 		logger.info("starting bigquery stream");
-		try {
-			esClient.admin()
-				.indices()
-				.prepareCreate(index)
-				.addMapping(type, "{\"" + type + "\":{\"_timestamp\":{\"enabled\":true}}}")
-				.execute()
-				.actionGet();
-			logger.info("Created Index {} with _timestamp mapping for {}", index, type);
-		} catch (Exception e) {
-			if (ExceptionsHelper.unwrapCause(e) instanceof IndexAlreadyExistsException) {
-				logger.debug("Not creating Index {} as it already exists", index);
-			}
-			else if (ExceptionsHelper.unwrapCause(e) instanceof ElasticsearchException) {
-				logger.debug("Mapping {}.{} already exists and will not be created", index, type);
-			}
-			else {
-				logger.warn("failed to create datasets [{}], disabling river...", e, index);
-				return;
-			}
-		}
-
-		try {
-			esClient.admin()
-				.indices()
-				.preparePutMapping(index)
-				.setType(type)
-				.setSource("{\"" + type + "\":{\"_timestamp\":{\"enabled\":true}}}")
-				.setIgnoreConflicts(true)
-				.execute()
-				.actionGet();
-		} catch (ElasticsearchException e) {
-			logger.debug("Mapping already exists for datasets {} and tables {}", index, type);
-		}
 
 		if (thread == null) {
 			try {
@@ -168,6 +138,8 @@ public class BigQueryRiver extends AbstractRiverComponent implements River {
 		private final Bigquery	client;
 		private List<String>	columns;
 		private BigInteger		fetchedRows;
+		private String			index;
+		private String			type;
 
 		/**
 		 * Initialize the parser by setting up the BigQuery client ready to take take commands.
@@ -206,9 +178,14 @@ public class BigQueryRiver extends AbstractRiverComponent implements River {
 				if (lastRun + interval < now) {
 					lastRun = now;
 					try {
+						index = evalJavaScript(indexScript);
+						type = evalJavaScript(typeScript);
+						if (!createMapping()) {
+							return;
+						}
 						executeJob(null);
 					} catch (ElasticsearchException | IOException | InterruptedException e) {
-						logger.error("Parser was unable to run properl", e);
+						logger.error("Parser was unable to run properly", e);
 					}
 					if (interval <= 0) {
 						logger.info("Stopping BigQuery Import Thread because no interval for repeated fetches has been configured");
@@ -227,13 +204,81 @@ public class BigQueryRiver extends AbstractRiverComponent implements River {
 			logger.info("BigQuery Import Thread has finished");
 		}
 
+		private boolean createMapping() {
+			if (mappingScript != null) {
+				final String mapping = evalJavaScript(mappingScript);
+				try {
+					esClient.admin()
+						.indices()
+						.preparePutMapping(index)
+						.setType(type)
+						.setSource(mapping)
+						.setIgnoreConflicts(true)
+						.execute()
+						.actionGet();
+				} catch (ElasticsearchException e) {
+					logger.debug("Unable to create mapping for datasets {} and tables {}", index, type);
+				}
+				return true;
+			}
+			
+			try {
+				esClient.admin()
+					.indices()
+					.prepareCreate(index)
+					.addMapping(type, "{\"" + type + "\":{\"_timestamp\":{\"enabled\":true}}}")
+					.execute()
+					.actionGet();
+				logger.info("Created Index {} with _timestamp mapping for {}", index, type);
+			} catch (Exception e) {
+				if (ExceptionsHelper.unwrapCause(e) instanceof IndexAlreadyExistsException) {
+					logger.debug("Not creating Index {} as it already exists", index);
+				}
+				else if (ExceptionsHelper.unwrapCause(e) instanceof ElasticsearchException) {
+					logger.debug("Mapping {}.{} already exists and will not be created", index, type);
+				}
+				else {
+					logger.warn("failed to create datasets [{}], disabling river", e, index);
+					return false;
+				}
+			}
+
+			try {
+				esClient.admin()
+					.indices()
+					.preparePutMapping(index)
+					.setType(type)
+					.setSource("{\"" + type + "\":{\"_timestamp\":{\"enabled\":true}}}")
+					.setIgnoreConflicts(true)
+					.execute()
+					.actionGet();
+			} catch (ElasticsearchException e) {
+				logger.debug("Mapping already exists for datasets {} and tables {}", index, type);
+			}
+			return true;
+		}
+
+		/**
+		 * Get the json document for this row.
+		 * 
+		 * @param rows
+		 * @return A string array with the first value holding the json document and the second element holding the unique id
+		 *         (if configured)
+		 * @throws IOException
+		 */
 		@SuppressWarnings("unchecked")
-		private String getJson(@Nonnull final TableRow rows) throws IOException {
+		private String[] getJson(@Nonnull final TableRow rows) throws IOException {
 			final Map<String, Object> document = new HashMap<>();
+			String uniqueId = null;
 			for (final Entry<String, Object> row : rows.entrySet()) {
 				int columnCounter = 0;
 				for (TableCell field : (ArrayList<TableCell>) row.getValue()) {
 					final String key = columns.get(columnCounter++);
+
+					if (key.equals(uniqueIdField)) {
+						uniqueId = (String) field.getV();
+						continue;
+					}
 
 					if (field.getV() instanceof String) {
 						final String value = (String) field.getV();
@@ -262,7 +307,7 @@ public class BigQueryRiver extends AbstractRiverComponent implements River {
 					}
 				}
 			}
-			return rows.getFactory().toString(document);
+			return new String[] { rows.getFactory().toString(document), uniqueId };
 		}
 
 		/**
@@ -281,7 +326,7 @@ public class BigQueryRiver extends AbstractRiverComponent implements River {
 				final JobConfiguration config = new JobConfiguration();
 				final JobConfigurationQuery queryConfig = new JobConfigurationQuery();
 
-				job.setConfiguration(config.setQuery(queryConfig.setQuery(evalQuery(query))));
+				job.setConfiguration(config.setQuery(queryConfig.setQuery(evalJavaScript(query))));
 
 				final Insert insert = client.jobs().insert(project, job).setProjectId(project);
 				jobReference = insert.execute().getJobReference();
@@ -295,6 +340,11 @@ public class BigQueryRiver extends AbstractRiverComponent implements River {
 
 				if (pollJob.getStatus().getState().equals("DONE")) {
 					logger.debug("BigQuery Job has finished, fetching results");
+
+					if (pollJob.getStatus().getErrorResult() != null) {
+						logger.info("BigQuery reported an error for the query: {}", pollJob.getStatus().getErrorResult().getMessage());
+						return;
+					}
 
 					final GetQueryResultsResponse queryResult = client.jobs()
 						.getQueryResults(project, pollJob.getJobReference().getJobId())
@@ -344,15 +394,11 @@ public class BigQueryRiver extends AbstractRiverComponent implements River {
 
 			while (!stopThread && !rows.isEmpty()) {
 				final TableRow row = rows.remove(0);
-				final String source = getJson(row);
+				final String[] jsonResult = getJson(row);
+				final String source = jsonResult[0];
 				final IndexRequestBuilder builder = esClient.prepareIndex(index, type);
-				if (uniqueIdField != null) {
-					if (!row.containsKey(uniqueIdField)) {
-						logger.error("A returned result didn't contain the configured unique id \"{}\"", uniqueIdField);
-					}
-					else {
-						builder.setId(String.valueOf(row.get(uniqueIdField)));
-					}
+				if (jsonResult[1] != null) {
+					builder.setId(jsonResult[1]);
 				}
 				builder.setOpType(OpType.CREATE)
 					.setReplicationType(ReplicationType.ASYNC)
@@ -369,16 +415,18 @@ public class BigQueryRiver extends AbstractRiverComponent implements River {
 			return;
 		}
 
-		private String evalQuery(@Nonnull final String query) {
-			if (!query.trim().toLowerCase().startsWith("select")) {
+		private String evalJavaScript(@Nonnull final String script) {
+			try {
 				final Context context = Context.enter();
 				final ScriptableObject scope = context.initStandardObjects();
-				final Object result = context.evaluateString(scope, query, "query", 1, null);
-				final String evaluatedQuery = Context.toString(result);
-				logger.debug("Query was javascript and has been evaluated to: {}", evaluatedQuery);
-				return evaluatedQuery;
+				final Object result = context.evaluateString(scope, script, "query", 1, null);
+				final String evaluatedScript = Context.toString(result);
+				Context.exit();
+				logger.debug("String was javascript and has been evaluated to: {}", evaluatedScript);
+				return evaluatedScript;
+			} catch (RhinoException re) {
+				return script;
 			}
-			return query;
 		}
 	}
 }
