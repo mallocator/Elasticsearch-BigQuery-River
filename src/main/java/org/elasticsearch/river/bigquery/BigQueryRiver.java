@@ -23,6 +23,7 @@ import org.elasticsearch.action.index.IndexRequest.OpType;
 import org.elasticsearch.action.index.IndexRequestBuilder;
 import org.elasticsearch.action.support.replication.ReplicationType;
 import org.elasticsearch.client.Client;
+import org.elasticsearch.client.Requests;
 import org.elasticsearch.common.inject.Inject;
 import org.elasticsearch.common.util.concurrent.EsExecutors;
 import org.elasticsearch.common.xcontent.support.XContentMapValues;
@@ -72,7 +73,7 @@ public class BigQueryRiver extends AbstractRiverComponent implements River {
 	private final long		interval;
 	public final String		typeScript;
 	public final String		indexScript;
-	private final String mappingScript;
+	private final String	mappingScript;
 
 	@Inject
 	public BigQueryRiver(final RiverName riverName, final RiverSettings settings, final Client esClient) {
@@ -181,6 +182,7 @@ public class BigQueryRiver extends AbstractRiverComponent implements River {
 						index = evalJavaScript(indexScript);
 						type = evalJavaScript(typeScript);
 						if (!createMapping()) {
+							logger.error("failed to create datasets [{}], disabling river", index);
 							return;
 						}
 						executeJob(null);
@@ -205,9 +207,29 @@ public class BigQueryRiver extends AbstractRiverComponent implements River {
 		}
 
 		private boolean createMapping() {
-			if (mappingScript != null) {
-				final String mapping = evalJavaScript(mappingScript);
+			boolean created = false;
+			final String mapping = mappingScript != null ? evalJavaScript(mappingScript) : "{\"" + type
+					+ "\":{\"_timestamp\":{\"enabled\":true}}}";
+
+			try {
+				logger.debug("Creating mapping");
+				esClient.admin().indices().prepareCreate(index).addMapping(type, mapping).execute().actionGet();
+				created = true;
+				logger.info("Created mapping for index {} with type {}", index, type);
+			} catch (Exception e) {
+				if (ExceptionsHelper.unwrapCause(e) instanceof IndexAlreadyExistsException) {
+					logger.debug("Not creating Index {} as it already exists", index);
+					created = true;
+				}
+				else if (ExceptionsHelper.unwrapCause(e) instanceof ElasticsearchException) {
+					logger.debug("Mapping {}.{} already exists and will not be created", index, type);
+					created = true;
+				}
+			}
+
+			if (!created) {
 				try {
+					logger.debug("Creating index and mapping");
 					esClient.admin()
 						.indices()
 						.preparePutMapping(index)
@@ -216,46 +238,20 @@ public class BigQueryRiver extends AbstractRiverComponent implements River {
 						.setIgnoreConflicts(true)
 						.execute()
 						.actionGet();
-				} catch (ElasticsearchException e) {
-					logger.debug("Unable to create mapping for datasets {} and tables {}", index, type);
-				}
-				return true;
-			}
-			
-			try {
-				esClient.admin()
-					.indices()
-					.prepareCreate(index)
-					.addMapping(type, "{\"" + type + "\":{\"_timestamp\":{\"enabled\":true}}}")
-					.execute()
-					.actionGet();
-				logger.info("Created Index {} with _timestamp mapping for {}", index, type);
-			} catch (Exception e) {
-				if (ExceptionsHelper.unwrapCause(e) instanceof IndexAlreadyExistsException) {
-					logger.debug("Not creating Index {} as it already exists", index);
-				}
-				else if (ExceptionsHelper.unwrapCause(e) instanceof ElasticsearchException) {
-					logger.debug("Mapping {}.{} already exists and will not be created", index, type);
-				}
-				else {
-					logger.warn("failed to create datasets [{}], disabling river", e, index);
-					return false;
+					created = true;
+					logger.info("Created index and mapping for index {} with type {}", index, type);
+				} catch (Exception e) {
+					if (ExceptionsHelper.unwrapCause(e) instanceof ElasticsearchException) {
+						logger.debug("Mapping {}.{} already exists and will not be created", index, type);
+						created = true;
+					}
 				}
 			}
 
-			try {
-				esClient.admin()
-					.indices()
-					.preparePutMapping(index)
-					.setType(type)
-					.setSource("{\"" + type + "\":{\"_timestamp\":{\"enabled\":true}}}")
-					.setIgnoreConflicts(true)
-					.execute()
-					.actionGet();
-			} catch (ElasticsearchException e) {
-				logger.debug("Mapping already exists for datasets {} and tables {}", index, type);
+			if (created) {
+				Requests.flushRequest(index).force();
 			}
-			return true;
+			return created;
 		}
 
 		/**
@@ -289,7 +285,7 @@ public class BigQueryRiver extends AbstractRiverComponent implements River {
 								document.put(key, map);
 								continue;
 							} catch (Exception e) {
-								logger.debug("Unable to parse json of field {}", e, key);
+								logger.trace("Unable to parse json of field {}", e, key);
 							}
 						}
 
@@ -300,7 +296,7 @@ public class BigQueryRiver extends AbstractRiverComponent implements River {
 								document.put(key, list);
 								continue;
 							} catch (Exception e) {
-								logger.debug("Unable to parse json of field {}", e, key);
+								logger.trace("Unable to parse json of field {}", e, key);
 							}
 						}
 						document.put(key, value);
@@ -388,7 +384,7 @@ public class BigQueryRiver extends AbstractRiverComponent implements River {
 		 */
 		private void parse(@Nonnull final List<TableRow> rows) throws ElasticsearchException, IOException, InterruptedException {
 			final int size = rows.size();
-			final String timestamp = String.valueOf((int) (System.currentTimeMillis() / 1000));
+			final String timestamp = String.valueOf(System.currentTimeMillis());
 			int progress = 0;
 			logger.info("Got {} results from BigQuery database", size);
 
