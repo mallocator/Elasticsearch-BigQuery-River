@@ -27,6 +27,7 @@ import org.elasticsearch.client.Requests;
 import org.elasticsearch.common.inject.Inject;
 import org.elasticsearch.common.util.concurrent.EsExecutors;
 import org.elasticsearch.common.xcontent.support.XContentMapValues;
+import org.elasticsearch.index.engine.DocumentAlreadyExistsException;
 import org.elasticsearch.indices.IndexAlreadyExistsException;
 import org.elasticsearch.river.AbstractRiverComponent;
 import org.elasticsearch.river.River;
@@ -74,6 +75,7 @@ public class BigQueryRiver extends AbstractRiverComponent implements River {
 	public final String		typeScript;
 	public final String		indexScript;
 	private final String	mappingScript;
+	private final boolean	create;
 
 	@Inject
 	public BigQueryRiver(final RiverName riverName, final RiverSettings settings, final Client esClient) {
@@ -87,6 +89,7 @@ public class BigQueryRiver extends AbstractRiverComponent implements River {
 		account = readConfig("account");
 		query = readConfig("query");
 		mappingScript = readConfig("mapping", null);
+		create = Boolean.valueOf(readConfig("create", null));
 		uniqueIdField = readConfig("uniqueIdField", null);
 		interval = Long.parseLong(readConfig("interval", "600000"));
 	}
@@ -384,6 +387,7 @@ public class BigQueryRiver extends AbstractRiverComponent implements River {
 		 */
 		private void parse(@Nonnull final List<TableRow> rows) throws ElasticsearchException, IOException, InterruptedException {
 			final int size = rows.size();
+			int count = 0;
 			final String timestamp = String.valueOf(System.currentTimeMillis());
 			int progress = 0;
 			logger.info("Got {} results from BigQuery database", size);
@@ -396,18 +400,24 @@ public class BigQueryRiver extends AbstractRiverComponent implements River {
 				if (jsonResult[1] != null) {
 					builder.setId(jsonResult[1]);
 				}
-				builder.setOpType(OpType.CREATE)
-					.setReplicationType(ReplicationType.ASYNC)
-					.setOperationThreaded(true)
-					.setTimestamp(timestamp)
-					.setSource(source)
-					.execute()
-					.actionGet();
+				try {
+					builder.setOpType(OpType.CREATE)
+						.setReplicationType(ReplicationType.ASYNC)
+						.setOperationThreaded(true)
+						.setTimestamp(timestamp)
+						.setSource(source)
+						.setCreate(create)
+						.execute()
+						.actionGet();
+					count++;
+				} catch (DocumentAlreadyExistsException daee) {
+					logger.trace("Document already exists, create flag is {}", daee, create);
+				}
 				if (++progress % 100 == 0) {
 					logger.debug("Processed {} entries ({} percent done)", progress, Math.round((float) progress / (float) size * 100f));
 				}
 			}
-			logger.info("Imported {} entries into ElasticSeach from BigQuery!", size);
+			logger.info("Imported {} entries into ElasticSeach from BigQuery (some duplicates may have been skipped)", count);
 			return;
 		}
 
